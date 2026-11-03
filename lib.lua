@@ -1,5 +1,5 @@
 --[[
-	HoloUI v1.1.0 - futuristic UI library for Roblox (Luau)
+	HoloUI v1.2.0 - futuristic UI library for Roblox (Luau)
 
 	Features
 	  * Neon / sci-fi look: animated gradient border, glow, scanline, spinning logo
@@ -22,6 +22,16 @@
 	  Section:AddToggle({ Name = "Enabled", Default = true, Flag = "Enabled", Callback = print })
 	  Window:AddSettingsTab()
 
+	Sub tabs (dock under the window)
+	  local Combat = Window:AddTab({ Name = "Combat", Icon = "swords" })
+	  local Aim    = Combat:AddSubTab({ Name = "Aimbot", Icon = "crosshair" })
+	  local Vis    = Combat:AddSubTab({ Name = "Visuals" })
+	  Aim:AddSection("AIMBOT"):AddToggle({ Name = "Enabled" })
+	  (when a tab has sub tabs, put its elements inside the sub tabs)
+
+	Watermark (top-left, under the Roblox top bar)
+	  Library:CreateWindow({ ..., Watermark = "HOLO//UI" })   -- or Library:SetWatermark("text" | { Text, Icon } | false)
+
 	Every element can also be added straight to a Tab (without a Section).
 	Every element returns an object with :SetValue(v, silent), :GetValue(), :OnChanged(fn).
 	Elements with a `Flag` are stored in Library.Flags[flag] / Library.Options[flag].
@@ -36,7 +46,7 @@ local HttpService = game:GetService("HttpService")
 local env = type(getgenv) == "function" and getgenv() or nil
 
 local Library = {
-	Version = "1.1.0",
+	Version = "1.2.0",
 	Flags = {},
 	Options = {},
 	Windows = {},
@@ -709,6 +719,7 @@ function Library:Unload()
 	for _, c in ipairs(self._conns) do pcall(function() c:Disconnect() end) end
 	self._conns, self._themed, self._keybinds, self._spin = {}, {}, {}, {}
 	self.Windows, self.Flags, self.Options = {}, {}, {}
+	self._wm = nil
 	activeDrag = nil
 	self._capture = nil
 	self._hooked = false
@@ -717,6 +728,67 @@ function Library:Unload()
 		self.Gui = nil
 	end
 	if env and env.HoloUI == self then env.HoloUI = nil end
+end
+
+----------------------------------------------------------------------
+-- watermark (top-left, below the Roblox top bar)
+----------------------------------------------------------------------
+
+function Library:SetWatermark(cfg)
+	if cfg == nil or cfg == false then
+		if self._wm then self._wm.Frame.Visible = false end
+		return
+	end
+	if type(cfg) == "string" then cfg = { Text = cfg } end
+	local gui = self:_ensureGui()
+	local T = self.Theme
+	if not self._wm or not self._wm.Frame.Parent then
+		local frame = new("Frame", {
+			Name = "Watermark", AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, MOBILE and 30 or 26),
+			Position = MOBILE and UDim2.new(0.04, 0, 0.135, 0) or UDim2.fromOffset(14, 44),
+			BackgroundColor3 = T.Background, BackgroundTransparency = 0.15, Parent = gui,
+		})
+		corner(frame, 8)
+		local st = stroke(frame, WHITE, 1.2)
+		local g = new("UIGradient", { Parent = st })
+		bind(g, function()
+			g.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, Library.Theme.Accent),
+				ColorSequenceKeypoint.new(0.5, Library.Theme.Accent2),
+				ColorSequenceKeypoint.new(1, Library.Theme.Accent),
+			})
+		end)
+		table.insert(self._spin, g)
+		pad(frame, 10, 0, 10, 0)
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
+			VerticalAlignment = Enum.VerticalAlignment.Center, Parent = frame,
+		})
+		local bar = new("Frame", { Size = UDim2.fromOffset(3, 12), LayoutOrder = 1, Parent = frame })
+		corner(bar, 2)
+		bindColor(bar, "BackgroundColor3", "Accent")
+		local label = new("TextLabel", {
+			Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, Font = Fonts.Bold, TextSize = 12,
+			LayoutOrder = 3, Parent = frame,
+		})
+		self._wm = { Frame = frame, Label = label }
+	end
+	local wm = self._wm
+	local old = wm.Frame:FindFirstChild("Icon")
+	if old then old:Destroy() end
+	if cfg.Icon then
+		local ic = makeIcon(cfg.Icon, {
+			Name = "Icon", Size = UDim2.fromOffset(14, 14), LayoutOrder = 2, Parent = wm.Frame,
+		})
+		if ic then bindColor(ic, "ImageColor3", "Accent") end
+	end
+	wm.Label.Text = cfg.Text or "HOLO//UI"
+	wm.Frame.Visible = cfg.Visible ~= false
+	return wm.Frame
+end
+
+function Library:SetWatermarkVisible(v)
+	if self._wm then self._wm.Frame.Visible = v and true or false end
 end
 
 ----------------------------------------------------------------------
@@ -1599,6 +1671,116 @@ function Tab:Select()
 	self.Window:SelectTab(self)
 end
 
+function Tab:SelectSubTab(sub)
+	if self._activeSub == sub then return end
+	local prev = self._activeSub
+	if prev then
+		prev._page.Visible = false
+		prev._setSelected(false)
+	end
+	self._activeSub = sub
+	sub._setSelected(true)
+	if self.Selected then
+		sub._page.Position = UDim2.new(0, 0, 0, 14)
+		sub._page.Visible = true
+		tween(sub._page, { Position = UDim2.new(0, 0, 0, 0) }, 0.3)
+	end
+end
+
+-- sub tab: shown as a button in the dock below the window
+function Tab:AddSubTab(cfg)
+	assert(not self._isSub, "[HoloUI] sub tabs cannot be nested")
+	cfg = cfgOf(cfg)
+	local W = self.Window
+	local T = Library.Theme
+	local sub = setmetatable({ Window = W, Name = cfg.Name or "Sub", _order = 0, _isSub = true, _parent = self }, Tab)
+	self._subs = self._subs or {}
+
+	local btn = new("TextButton", {
+		Name = sub.Name, Size = UDim2.fromOffset(0, W._dockH - 8), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = T.Element, BackgroundTransparency = 1, LayoutOrder = #self._subs + 1,
+		Visible = false, Parent = W._dock,
+	})
+	corner(btn, 7)
+	pad(btn, 12, 0, 12, 0)
+	local inner = new("Frame", {
+		Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Parent = btn,
+	})
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
+		VerticalAlignment = Enum.VerticalAlignment.Center, Parent = inner,
+	})
+	local subIcon
+	if cfg.Icon then
+		subIcon = makeIcon(cfg.Icon, {
+			Name = "Icon", ImageColor3 = cfg.IconColor or T.SubText, Size = UDim2.fromOffset(14, 14), LayoutOrder = 1, Parent = inner,
+		})
+	end
+	local label = new("TextLabel", {
+		Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, Text = sub.Name, Font = Fonts.Bold,
+		TextSize = TEXT_SIZE - 1, TextColor3 = T.SubText, LayoutOrder = 2, Parent = inner,
+	})
+	local underline = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -2), Size = UDim2.fromOffset(0, 2), Parent = btn,
+	})
+	corner(underline, 1)
+	bindColor(underline, "BackgroundColor3", "Accent")
+
+	local page = new("ScrollingFrame", {
+		Name = sub.Name .. "SubPage", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+		ScrollBarThickness = MOBILE and 4 or 3, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y, Visible = false, Parent = W._content,
+	})
+	bindColor(page, "ScrollBarImageColor3", "Accent")
+	new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+	pad(page, 10, 10, 12, 10)
+
+	sub.Holder, sub.Scroller, sub._page, sub.Instance, sub._btn = page, page, page, btn, btn
+	sub._setSelected = function(on)
+		sub.Selected = on
+		tween(btn, { BackgroundTransparency = on and 0.35 or 1 }, 0.2)
+		tween(underline, { Size = UDim2.fromOffset(on and 16 or 0, 2) }, 0.25, Enum.EasingStyle.Back)
+		tween(label, { TextColor3 = on and Library.Theme.Accent or T.SubText }, 0.2)
+		if subIcon and not cfg.IconColor then
+			tween(subIcon, { ImageColor3 = on and Library.Theme.Accent or T.SubText }, 0.2)
+		end
+	end
+	bind(label, function()
+		if sub.Selected then
+			label.TextColor3 = Library.Theme.Accent
+			if subIcon and not cfg.IconColor then subIcon.ImageColor3 = Library.Theme.Accent end
+		end
+	end)
+	btn.MouseEnter:Connect(function()
+		if not sub.Selected then tween(btn, { BackgroundTransparency = 0.7 }, 0.15) end
+	end)
+	btn.MouseLeave:Connect(function()
+		if not sub.Selected then tween(btn, { BackgroundTransparency = 1 }, 0.15) end
+	end)
+	btn.Activated:Connect(function()
+		W:SelectTab(self)
+		self:SelectSubTab(sub)
+	end)
+	sub.Select = function()
+		W:SelectTab(self)
+		self:SelectSubTab(sub)
+	end
+
+	table.insert(self._subs, sub)
+	if not self._activeSub then
+		self._activeSub = sub
+		sub._setSelected(true)
+		if self.Selected then
+			self._page.Visible = false
+			sub._page.Visible = true
+		end
+	end
+	W._hasSubs = true
+	if W._fit then W._fit() end
+	W:_refreshDock()
+	return sub
+end
+
 ----------------------------------------------------------------------
 -- Window
 ----------------------------------------------------------------------
@@ -1642,8 +1824,21 @@ end
 
 function Window:ToggleLock() self:SetLocked(not self.Locked) end
 
+function Window:_refreshDock()
+	if not self._dock then return end
+	local cur = self.CurrentTab
+	local has = cur ~= nil and cur._subs ~= nil and #cur._subs > 0
+	for _, t in ipairs(self.Tabs) do
+		if t._subs then
+			for _, s in ipairs(t._subs) do s._btn.Visible = (t == cur) end
+		end
+	end
+	self._dock.Visible = has and not self.Minimized
+end
+
 function Window:SetMinimized(v)
 	self.Minimized = v and true or false
+	self:_refreshDock()
 	local size = self.FullSize
 	if self.Minimized then
 		tween(self.Root, { Size = UDim2.fromOffset(size.X, self._topbar) }, 0.3)
@@ -1678,13 +1873,20 @@ function Window:SelectTab(tab)
 	local prev = self.CurrentTab
 	if prev then
 		prev._page.Visible = false
+		if prev._activeSub then prev._activeSub._page.Visible = false end
 		prev._setSelected(false)
 	end
 	self.CurrentTab = tab
-	tab._page.Position = UDim2.new(0, 0, 0, 14)
-	tab._page.Visible = true
 	tab._setSelected(true)
-	tween(tab._page, { Position = UDim2.new(0, 0, 0, 0) }, 0.3)
+	local target = tab._page
+	if tab._subs and #tab._subs > 0 and tab._activeSub then
+		tab._page.Visible = false
+		target = tab._activeSub._page
+	end
+	target.Position = UDim2.new(0, 0, 0, 14)
+	target.Visible = true
+	tween(target, { Position = UDim2.new(0, 0, 0, 0) }, 0.3)
+	self:_refreshDock()
 end
 
 function Window:AddTab(cfg)
@@ -1837,7 +2039,10 @@ function Library:CreateWindow(cfg)
 	sz = sz or Vector2.new(MOBILE and 520 or 600, MOBILE and 300 or 400)
 	local TOPBAR = MOBILE and 48 or 44
 	local SIDEBAR = MOBILE and 100 or 132
+	local DOCK_H = MOBILE and 42 or 38
+	local TB, TBS -- floating toggle button (created further down)
 	W._topbar = TOPBAR
+	W._dockH = DOCK_H
 
 	local vp = viewport(gui)
 	local w0 = math.min(sz.X, vp.X - 16)
@@ -2051,6 +2256,29 @@ function Library:CreateWindow(cfg)
 
 	W.Root, W.Main, W._scale, W._fade = Root, Main, scale, fade
 
+	-- sub tab dock: sits just under the window and auto-shrinks to fit the screen
+	local dock = new("Frame", {
+		Name = "SubTabDock", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 1, 8),
+		Size = UDim2.fromOffset(0, DOCK_H), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = T.Background,
+		Visible = false, Parent = Scaler,
+	})
+	corner(dock, 10)
+	bindColor(stroke(dock, T.Accent, 1.2, 0.35), "Color", "Accent")
+	pad(dock, 4, 4, 4, 4)
+	local dockLayout = new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder,
+		VerticalAlignment = Enum.VerticalAlignment.Center, Parent = dock,
+	})
+	local dockScale = new("UIScale", { Parent = dock })
+	W._dock = dock
+	local function fitDock()
+		local natural = dockLayout.AbsoluteContentSize.X + 8
+		local avail = viewport(gui).X - 16
+		local sc = natural > 0 and math.clamp(avail / natural, 0.5, 1) or 1
+		if math.abs(dockScale.Scale - sc) > 0.001 then dockScale.Scale = sc end
+	end
+	dockLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(fitDock)
+
 	-- dragging the window --------------------------------------------------
 	local function clampWindow(x, y)
 		local v = viewport(gui)
@@ -2060,22 +2288,35 @@ function Library:CreateWindow(cfg)
 
 	local function fit()
 		local v = viewport(gui)
+		local reserve = W._hasSubs and (DOCK_H + 10) or 0 -- room for the sub tab dock
 		local w = math.min(sz.X, v.X - 16)
-		local h = math.min(sz.Y, v.Y - 16)
+		local h = math.min(sz.Y, v.Y - 16 - reserve)
 		W.FullSize = Vector2.new(w, h)
 		Root.Size = UDim2.fromOffset(w, W.Minimized and TOPBAR or h)
 		local p = Root.Position
 		local x, y = clampWindow(p.X.Offset, p.Y.Offset)
+		if reserve > 0 and not W.Minimized then
+			y = math.max(math.min(y, v.Y - h - reserve - 8), 0)
+		end
 		Root.Position = UDim2.fromOffset(x, y)
+		if TB then -- keep the floating button on screen after a resize / rotation
+			local tp = TB.Position
+			TB.Position = UDim2.fromOffset(
+				math.clamp(tp.X.Offset, 0, math.max(v.X - TBS, 0)),
+				math.clamp(tp.Y.Offset, 0, math.max(v.Y - TBS, 0))
+			)
+		end
+		fitDock()
 	end
+	W._fit = fit
 	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(fit)
 
 	-- floating toggle button (draggable, great for mobile) -------------------
-	local TBS = MOBILE and 52 or 44
+	TBS = MOBILE and 52 or 44
 	local showTB = cfg.ToggleButton
 	if showTB == nil then showTB = MOBILE end
 	W._tbVisible = showTB and true or false
-	local TB = new("TextButton", {
+	TB = new("TextButton", {
 		Name = "ToggleButton", Size = UDim2.fromOffset(TBS, TBS), Position = UDim2.fromOffset(16, math.floor(vp.Y * 0.35)),
 		BackgroundColor3 = T.Background, Visible = W._tbVisible, Active = true, Parent = gui,
 	})
@@ -2126,6 +2367,8 @@ function Library:CreateWindow(cfg)
 	W._toggleButton = TB
 
 	table.insert(self.Windows, W)
+
+	if cfg.Watermark then self:SetWatermark(cfg.Watermark) end
 
 	-- opening animation
 	tween(scale, { Scale = 1 }, 0.55, Enum.EasingStyle.Back)
