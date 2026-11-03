@@ -1,5 +1,5 @@
 --[[
-	HoloUI v1.0.0 - futuristic UI library for Roblox (Luau)
+	HoloUI v1.1.0 - futuristic UI library for Roblox (Luau)
 
 	Features
 	  * Neon / sci-fi look: animated gradient border, glow, scanline, spinning logo
@@ -11,6 +11,8 @@
 	  * Elements   : Label, Paragraph, Divider, Button, Toggle, Slider, Input, Dropdown
 	                 (single / multi), Keybind, ColorPicker, Progress, Notifications, Tooltips
 	  * Config save / load (when the executor exposes writefile / readfile)
+	  * Lucide icons: `Icon = "home"` on tabs, sections, elements, notifications and the
+	    window / floating button (also accepts rbxassetid:// ids). See the icons section below.
 
 	Quick start
 	  local Library = loadstring(readfile("lib.lua"))()      -- or require(ModuleScript)
@@ -34,7 +36,7 @@ local HttpService = game:GetService("HttpService")
 local env = type(getgenv) == "function" and getgenv() or nil
 
 local Library = {
-	Version = "1.0.0",
+	Version = "1.1.0",
 	Flags = {},
 	Options = {},
 	Windows = {},
@@ -246,6 +248,192 @@ local function setScrolling(self, enabled)
 end
 
 ----------------------------------------------------------------------
+-- icons (Lucide)
+----------------------------------------------------------------------
+-- Anywhere an `Icon` option is accepted you can pass:
+--   "home" | "lucide-home" | "lucide:home"   a Lucide icon name
+--   "rbxassetid://123" | 123 | "123"         any Roblox image asset
+-- Lucide names are resolved from a registry (name -> sprite). Fill it with
+-- Library:LoadIcons(table | url | file path | function), or let it auto-load from
+-- Library.IconSources the first time a Lucide name is used (set
+-- Library.AutoLoadIcons = false to disable the network fetch).
+-- Accepted entry shapes: "rbxassetid://id" | id | { Image, ImageRectSize, ImageRectOffset }
+-- (ImageRectPosition works too) | { id, {sx, sy}, {ox, oy} }.
+
+Library.IconSources = { "https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua" }
+Library.AutoLoadIcons = true
+Library._icons = (env and env.HoloUI_Icons) or {}
+Library._iconsTried = next(Library._icons) ~= nil
+if env then env.HoloUI_Icons = Library._icons end
+
+local function assetUrl(v)
+	if type(v) == "number" then return string.format("rbxassetid://%d", v) end
+	if type(v) == "string" then
+		if v:match("^%d+$") then return "rbxassetid://" .. v end
+		if v:match("^rbxasset") or v:match("^https?://") then return v end
+	end
+	return nil
+end
+
+local function toVec(v)
+	if typeof(v) == "Vector2" then return v end
+	if type(v) == "table" then
+		local x, y = v.X or v.x or v[1], v.Y or v.y or v[2]
+		if type(x) == "number" and type(y) == "number" then return Vector2.new(x, y) end
+	end
+	return nil
+end
+
+local function iconKey(name)
+	local k = string.lower(tostring(name)):gsub("^%s+", ""):gsub("%s+$", "")
+	k = k:gsub("^lucide[%-:_%.]", ""):gsub("[%s_]+", "-")
+	return k
+end
+
+-- normalise any supported entry to { Image, ImageRectSize, ImageRectOffset }
+local function parseIcon(e, sheets)
+	if type(e) == "number" or type(e) == "string" then
+		local img = assetUrl(e)
+		return img and { Image = img } or nil
+	end
+	if type(e) ~= "table" then return nil end
+	local img, size, offset
+	if e[1] ~= nil then
+		img, size, offset = e[1], toVec(e[2]), toVec(e[3])
+	else
+		img = e.Image or e.image or e.id or e.Id or e.ID
+		size = toVec(e.ImageRectSize or e.imageRectSize)
+		offset = toVec(e.ImageRectOffset or e.ImageRectPosition or e.imageRectOffset or e.imageRectPosition)
+	end
+	if img == nil then return nil end
+	local sheet = sheets and sheets[tostring(img)]
+	img = assetUrl(sheet or img)
+	if not img then return nil end
+	return { Image = img, ImageRectSize = size, ImageRectOffset = offset }
+end
+
+-- pick the Lucide set (and spritesheet map) out of whatever a source returned
+local function iconSet(root)
+	if type(root) ~= "table" then return nil end
+	local sheets = root.Spritesheets or root.spritesheets
+	for _, k in ipairs({ "lucide", "Lucide", "assets", "Icons" }) do
+		local s = root[k]
+		if type(s) == "table" then
+			if k == "Icons" then s = s.lucide or s.Lucide or s end
+			return s, sheets
+		end
+	end
+	return root, sheets
+end
+
+local function readSource(src)
+	if src:match("^https?://") then
+		local ok, body = pcall(function() return game:HttpGet(src) end)
+		if ok and type(body) == "string" and body ~= "" then return body end
+		local req = type(request) == "function" and request or (type(http_request) == "function" and http_request) or nil
+		if req then
+			local ok2, res = pcall(req, { Url = src, Method = "GET" })
+			if ok2 and type(res) == "table" and type(res.Body) == "string" and res.Body ~= "" then return res.Body end
+		end
+		return nil
+	end
+	if type(isfile) == "function" and type(readfile) == "function" then
+		local ok, body = pcall(function() if isfile(src) then return readfile(src) end end)
+		if ok and type(body) == "string" then return body end
+	end
+	return nil
+end
+
+-- add icons to the registry; returns how many were added
+function Library:RegisterIcons(map, sheets)
+	local n = 0
+	if type(map) ~= "table" then return n end
+	for name, entry in pairs(map) do
+		if type(name) == "string" then
+			local d = parseIcon(entry, sheets)
+			if d then
+				self._icons[iconKey(name)] = d
+				n = n + 1
+			end
+		end
+	end
+	return n
+end
+
+-- source: table | function returning a table | url | file path (Lua module or JSON)
+function Library:LoadIcons(source, sheets)
+	local root = source
+	if type(source) == "function" then
+		local ok, r = pcall(source)
+		root = ok and r or nil
+	elseif type(source) == "string" then
+		local text = readSource(source)
+		if not text then return 0 end
+		root = nil
+		if text:match("^%s*[%{%[]") then
+			local ok, r = pcall(function() return HttpService:JSONDecode(text) end)
+			root = ok and r or nil
+		elseif type(loadstring) == "function" then
+			local fn = loadstring(text)
+			if fn then
+				local ok, r = pcall(fn)
+				root = ok and r or nil
+			end
+		end
+	end
+	local set, sh = iconSet(root)
+	if not set then return 0 end
+	local n = self:RegisterIcons(set, sh or sheets)
+	if n > 0 then self._iconsTried = true end
+	return n
+end
+
+function Library:_autoLoadIcons()
+	if self._iconsTried then return end
+	self._iconsTried = true
+	for _, src in ipairs(self.IconSources) do
+		if self:LoadIcons(src) > 0 then return end
+	end
+	warn("[HoloUI] couldn't load the Lucide icon set. Call Library:LoadIcons(<table | url | file>) yourself, or use rbxassetid:// icons.")
+end
+
+-- returns { Image, ImageRectSize, ImageRectOffset } or nil
+function Library:GetIcon(name)
+	if name == nil or name == "" then return nil end
+	local direct = parseIcon(name)
+	if direct then return direct end
+	if type(name) ~= "string" then return nil end
+	local key = iconKey(name)
+	local hit = self._icons[key]
+	if hit then return hit end
+	if self.AutoLoadIcons and not self._iconsTried then
+		self:_autoLoadIcons()
+		return self._icons[key]
+	end
+	return nil
+end
+
+local warnedIcons = {}
+local function makeIcon(name, props)
+	local d = Library:GetIcon(name)
+	if not d then
+		local k = tostring(name)
+		if not warnedIcons[k] then
+			warnedIcons[k] = true
+			warn("[HoloUI] unknown icon: " .. k)
+		end
+		return nil
+	end
+	props = props or {}
+	props.BackgroundTransparency = 1
+	props.Image = d.Image
+	props.ImageRectSize = d.ImageRectSize or Vector2.zero
+	props.ImageRectOffset = d.ImageRectOffset or Vector2.zero
+	props.ScaleType = Enum.ScaleType.Fit
+	return new("ImageLabel", props)
+end
+
+----------------------------------------------------------------------
 -- library level: gui, input hooks, notifications, tooltips, theme, config
 ----------------------------------------------------------------------
 
@@ -421,7 +609,13 @@ function Library:Notify(a, b, c)
 		BackgroundTransparency = 1,
 		Parent = card,
 	})
-	pad(inner, 14, 10, 12, 13)
+	local notifIcon = cfg.Icon and self:GetIcon(cfg.Icon)
+	pad(inner, notifIcon and 38 or 14, 10, 12, 13)
+	if notifIcon then
+		makeIcon(cfg.Icon, {
+			Name = "Icon", ImageColor3 = color, Position = UDim2.fromOffset(14, 10), Size = UDim2.fromOffset(16, 16), Parent = card,
+		})
+	end
 	new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder, Parent = inner })
 	new("TextLabel", {
 		Size = UDim2.new(1, 0, 0, 16), AutomaticSize = Enum.AutomaticSize.Y,
@@ -576,13 +770,27 @@ local function makeRow(self, height, cfg)
 	corner(row, 6)
 	stroke(row, Library.Theme.Stroke, 1, 0.2)
 	if cfg and cfg.Tooltip then attachTooltip(row, cfg.Tooltip) end
+	if cfg and cfg.Icon then
+		local h = height or ROW
+		local ic = makeIcon(cfg.Icon, {
+			Name = "Icon", ImageColor3 = cfg.IconColor or Library.Theme.SubText, AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.fromOffset(12, h > ROW and 15 or ROW / 2), Size = UDim2.fromOffset(16, 16), Parent = row,
+		})
+		if ic then row:SetAttribute("IconInset", 24) end
+	end
 	return row
 end
 
+-- extra left offset a row's label needs when the row has an icon
+local function rowInset(row)
+	return row:GetAttribute("IconInset") or 0
+end
+
 local function rowLabel(row, text, widthOffset)
+	local ins = rowInset(row)
 	return new("TextLabel", {
-		Position = UDim2.fromOffset(12, 0),
-		Size = UDim2.new(1, -(widthOffset or 70), 1, 0),
+		Position = UDim2.fromOffset(12 + ins, 0),
+		Size = UDim2.new(1, -((widthOffset or 70) + ins), 1, 0),
 		Text = text or "",
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
@@ -781,7 +989,7 @@ function Elements:AddSlider(cfg)
 	local obj = newObject(cfg, "Slider", math.clamp(cfg.Default or min, min, max))
 
 	new("TextLabel", {
-		Position = UDim2.fromOffset(12, 6), Size = UDim2.new(1, -110, 0, 18), Text = cfg.Name or "Slider",
+		Position = UDim2.fromOffset(12 + rowInset(row), 6), Size = UDim2.new(1, -(110 + rowInset(row)), 0, 18), Text = cfg.Name or "Slider",
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
 	})
 	local valueLbl = new("TextLabel", {
@@ -864,7 +1072,7 @@ function Elements:AddInput(cfg)
 	local obj = newObject(cfg, "Input", cfg.Numeric and (tonumber(cfg.Default) or 0) or tostring(cfg.Default or ""))
 
 	new("TextLabel", {
-		Position = UDim2.fromOffset(12, 0), Size = UDim2.new(0.4, -12, 1, 0), Text = cfg.Name or "Input",
+		Position = UDim2.fromOffset(12 + rowInset(row), 0), Size = UDim2.new(0.4, -(12 + rowInset(row)), 1, 0), Text = cfg.Name or "Input",
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
 	})
 	local boxFrame = new("Frame", {
@@ -923,7 +1131,7 @@ function Elements:AddDropdown(cfg)
 	local buttons = {}
 
 	new("TextLabel", {
-		Position = UDim2.fromOffset(12, 0), Size = UDim2.new(0.45, -12, 0, ROW), Text = cfg.Name or "Dropdown",
+		Position = UDim2.fromOffset(12 + rowInset(row), 0), Size = UDim2.new(0.45, -(12 + rowInset(row)), 0, ROW), Text = cfg.Name or "Dropdown",
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
 	})
 	local valueLbl = new("TextLabel", {
@@ -1299,7 +1507,7 @@ function Elements:AddProgress(cfg)
 	local obj = newObject(cfg, "Progress", math.clamp(cfg.Default or min, min, max))
 
 	new("TextLabel", {
-		Position = UDim2.fromOffset(12, 5), Size = UDim2.new(1, -80, 0, 18), Text = cfg.Name or "Progress",
+		Position = UDim2.fromOffset(12 + rowInset(row), 5), Size = UDim2.new(1, -(80 + rowInset(row)), 0, 18), Text = cfg.Name or "Progress",
 		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
 	})
 	local valueLbl = new("TextLabel", {
@@ -1348,7 +1556,8 @@ local Section = {}
 setmetatable(Section, { __index = Elements })
 Section.__index = Section
 
-function Tab:AddSection(title)
+function Tab:AddSection(title, icon)
+	if type(title) == "table" then icon, title = title.Icon, title.Title or title.Name end
 	local T = Library.Theme
 	local sec = setmetatable({ Window = self.Window, Scroller = self.Scroller, _order = 0 }, Section)
 	local frame = new("Frame", {
@@ -1364,8 +1573,19 @@ function Tab:AddSection(title)
 	local bar = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(3, 12), Parent = header })
 	corner(bar, 2)
 	bindColor(bar, "BackgroundColor3", "Accent")
+	local lblX = 10
+	if icon then
+		local ic = makeIcon(icon, {
+			Name = "Icon", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0),
+			Size = UDim2.fromOffset(14, 14), Parent = header,
+		})
+		if ic then
+			bindColor(ic, "ImageColor3", "Accent")
+			lblX = 30
+		end
+	end
 	local lbl = new("TextLabel", {
-		Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -10, 1, 0), Text = string.upper(title or "Section"),
+		Position = UDim2.fromOffset(lblX, 0), Size = UDim2.new(1, -lblX, 1, 0), Text = string.upper(title or "Section"),
 		Font = Fonts.Title, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, Parent = header,
 	})
 	bindColor(lbl, "TextColor3", "Accent")
@@ -1483,12 +1703,13 @@ function Window:AddTab(cfg)
 	corner(indicator, 2)
 	bindColor(indicator, "BackgroundColor3", "Accent")
 	local xOff = 14
+	local tabIcon
 	if cfg.Icon then
-		new("ImageLabel", {
-			BackgroundTransparency = 1, Image = cfg.Icon, ImageColor3 = T.SubText, AnchorPoint = Vector2.new(0, 0.5),
+		tabIcon = makeIcon(cfg.Icon, {
+			Name = "Icon", ImageColor3 = cfg.IconColor or T.SubText, AnchorPoint = Vector2.new(0, 0.5),
 			Position = UDim2.new(0, 12, 0.5, 0), Size = UDim2.fromOffset(16, 16), Parent = btn,
 		})
-		xOff = 34
+		if tabIcon then xOff = 34 end
 	end
 	local label = new("TextLabel", {
 		Position = UDim2.fromOffset(xOff, 0), Size = UDim2.new(1, -xOff - 6, 1, 0), Text = tab.Name, Font = Fonts.Bold,
@@ -1514,9 +1735,15 @@ function Window:AddTab(cfg)
 		tween(btn, { BackgroundTransparency = on and 0.35 or 1 }, 0.2)
 		tween(indicator, { Size = UDim2.fromOffset(3, on and 18 or 0) }, 0.25, Enum.EasingStyle.Back)
 		tween(label, { TextColor3 = on and Library.Theme.Accent or T.SubText }, 0.2)
+		if tabIcon and not cfg.IconColor then
+			tween(tabIcon, { ImageColor3 = on and Library.Theme.Accent or T.SubText }, 0.2)
+		end
 	end
 	bind(label, function()
-		if tab.Selected then label.TextColor3 = Library.Theme.Accent end
+		if tab.Selected then
+			label.TextColor3 = Library.Theme.Accent
+			if tabIcon and not cfg.IconColor then tabIcon.ImageColor3 = Library.Theme.Accent end
+		end
 	end)
 
 	btn.MouseEnter:Connect(function()
@@ -1532,8 +1759,8 @@ function Window:AddTab(cfg)
 	return tab
 end
 
-function Window:AddSettingsTab()
-	local tab = self:AddTab({ Name = "Settings" })
+function Window:AddSettingsTab(icon)
+	local tab = self:AddTab({ Name = "Settings", Icon = icon })
 	local ui = tab:AddSection("Interface")
 	ui:AddKeybind({
 		Name = "Toggle UI key", Default = self.ToggleKey, Flag = "HoloUI_ToggleKey",
@@ -1662,6 +1889,16 @@ function Library:CreateWindow(cfg)
 	corner(logo, 2)
 	bindGradient(new("UIGradient", { Parent = logo }))
 	TweenService:Create(logo, TweenInfo.new(6, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), { Rotation = 405 }):Play()
+	if cfg.Icon then
+		local ic = makeIcon(cfg.Icon, {
+			Name = "Icon", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 22, 0.5, 0),
+			Size = UDim2.fromOffset(18, 18), Parent = Top,
+		})
+		if ic then
+			bindColor(ic, "ImageColor3", "Accent")
+			logo.Visible = false
+		end
+	end
 
 	local hasSub = cfg.Subtitle ~= nil and cfg.Subtitle ~= ""
 	local title = new("TextLabel", {
@@ -1860,6 +2097,16 @@ function Library:CreateWindow(cfg)
 	corner(tbLogo, 3)
 	bindGradient(new("UIGradient", { Parent = tbLogo }))
 	TweenService:Create(tbLogo, TweenInfo.new(6, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), { Rotation = 405 }):Play()
+	if cfg.Icon then
+		local ic = makeIcon(cfg.Icon, {
+			Name = "Icon", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(22, 22), Parent = TB,
+		})
+		if ic then
+			bindColor(ic, "ImageColor3", "Accent")
+			tbLogo.Visible = false
+		end
+	end
 	local tbScale = new("UIScale", { Parent = TB })
 	TB.InputBegan:Connect(function(input)
 		if isPointer(input) then tween(tbScale, { Scale = 0.9 }, 0.12) end
